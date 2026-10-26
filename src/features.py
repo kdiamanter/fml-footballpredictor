@@ -27,6 +27,11 @@ WINDOW = 5          # last 5 matches for overall form
 VENUE_WINDOW = 5    # last 5 home (or away) matches for venue form
 VENUE_MIN = 3       # need at least 3 home (or away) matches for venue form
 
+# Season points per game ("the league table") on a team's first match of a
+# season: its previous season's points per game, or this value for a team with
+# no previous Premier League season in the data (typical promoted-team level).
+PROMOTED_PPG = 1.0
+
 # Statistics averaged over the last WINDOW matches.
 AVG_STATS = ["xg_for", "xg_against", "goals_for", "goals_against"]
 
@@ -40,6 +45,7 @@ TEAM_FEATURES = [
     "roll_win_rate",       # share of the last 5 matches won
     "venue_ppg",           # points per game in recent home (or away) matches
     "venue_xgd",           # xG minus xGA per game in recent home (or away) matches
+    "season_ppg",          # points per game this season so far (the league table)
 ]
 
 # Home-minus-away differences, the main model inputs in Stage 2.
@@ -52,6 +58,7 @@ DIFF_FEATURES = [
     "win_rate_diff",
     "venue_ppg_diff",
     "venue_xgd_diff",
+    "season_ppg_diff",
 ]
 
 FEATURE_COLUMNS = (
@@ -76,6 +83,17 @@ def matches_before(matches: pd.DataFrame, date) -> pd.DataFrame:
     """Matches played strictly before the calendar day of ``date``."""
     day = pd.Timestamp(date).normalize()
     return matches[pd.to_datetime(matches["date"]).dt.normalize() < day]
+
+
+def season_of(dates) -> pd.Series:
+    """Season as its starting year: August 2025 to July 2026 is season 2025.
+
+    Taken from the date (not a season column) so that upcoming fixtures work
+    too. Premier League seasons start in August; the COVID-delayed end of
+    2019/20 (July 2020) still counts as season 2019.
+    """
+    dates = pd.to_datetime(pd.Series(dates))
+    return dates.dt.year - (dates.dt.month < 8).astype(int)
 
 
 def to_team_matches(matches: pd.DataFrame) -> pd.DataFrame:
@@ -110,6 +128,7 @@ def to_team_matches(matches: pd.DataFrame) -> pd.DataFrame:
         default=0,
     )
     rows["win"] = (rows["goals_for"] > rows["goals_against"]).astype(float)
+    rows["season_key"] = season_of(rows["date"]).to_numpy()
 
     # A team playing twice on one day would break the "strictly before D" rule.
     same_day = rows.assign(_day=rows["date"].dt.normalize()).duplicated(["team", "_day"], keep=False)
@@ -143,6 +162,7 @@ def add_difference_features(df: pd.DataFrame) -> pd.DataFrame:
     df["win_rate_diff"] = df["home_roll_win_rate"] - df["away_roll_win_rate"]
     df["venue_ppg_diff"] = df["home_venue_ppg"] - df["away_venue_ppg"]
     df["venue_xgd_diff"] = df["home_venue_xgd"] - df["away_venue_xgd"]
+    df["season_ppg_diff"] = df["home_season_ppg"] - df["away_season_ppg"]
     return df
 
 
@@ -178,6 +198,18 @@ def build_match_features(
     rows["venue_ppg"] = _past_rolling(rows["points"], venue_groups, venue_window, venue_min, "mean")
     rows["xgd"] = rows["xg_for"] - rows["xg_against"]
     rows["venue_xgd"] = _past_rolling(rows["xgd"], venue_groups, venue_window, venue_min, "mean")
+
+    # Season points per game before this match (the league table so far).
+    season_groups = rows.groupby(["team", "season_key"], sort=False)
+    played_before = season_groups.cumcount()
+    points_before = season_groups["points"].cumsum() - rows["points"]
+    rows["season_ppg"] = points_before / played_before.where(played_before > 0)
+    # First match of a season: previous season's points per game, else PROMOTED_PPG.
+    final_ppg = season_groups["points"].mean()
+    previous = pd.MultiIndex.from_arrays([rows["team"], rows["season_key"] - 1])
+    rows["season_ppg"] = rows["season_ppg"].fillna(
+        pd.Series(final_ppg.reindex(previous).to_numpy(), index=rows.index)
+    ).fillna(PROMOTED_PPG)
 
     # Back to one row per match.
     for side in ["home", "away"]:
@@ -232,6 +264,15 @@ def team_features_before(
 
     last = rows.tail(window)
     last_venue = venue_rows.tail(venue_window)
+    season = int(season_of([date]).iloc[0])
+    this_season = rows[rows["season_key"] == season]
+    last_season = rows[rows["season_key"] == season - 1]
+    if len(this_season):
+        season_ppg = this_season["points"].mean()
+    elif len(last_season):
+        season_ppg = last_season["points"].mean()
+    else:
+        season_ppg = PROMOTED_PPG
     return {
         "roll_xg_for": last["xg_for"].mean(),
         "roll_xg_against": last["xg_against"].mean(),
@@ -241,6 +282,7 @@ def team_features_before(
         "roll_win_rate": last["win"].mean(),
         "venue_ppg": last_venue["points"].mean(),
         "venue_xgd": (last_venue["xg_for"] - last_venue["xg_against"]).mean(),
+        "season_ppg": float(season_ppg),
     }
 
 
