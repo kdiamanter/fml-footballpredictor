@@ -9,6 +9,7 @@ import pytest
 from src.data import match_outcome
 from src.features import (
     FEATURE_COLUMNS,
+    PROMOTED_PPG,
     InsufficientHistoryError,
     UnknownTeamError,
     build_fixture_features,
@@ -58,8 +59,11 @@ def test_rolling_needs_full_window(arsenal_home_run):
     assert np.isnan(fifth["home_roll_xg_for"])
     # ...but venue form needs only 3 home matches: (3+3+1+0)/4 = 1.75
     assert fifth["home_venue_ppg"] == pytest.approx(1.75)
-    # First match has no history at all.
-    assert feats.iloc[0][[c for c in FEATURE_COLUMNS if c.startswith("home_")]].isna().all()
+    # First match has no history at all, so no form features...
+    form = [c for c in FEATURE_COLUMNS if c.startswith("home_") and c != "home_season_ppg"]
+    assert feats.iloc[0][form].isna().all()
+    # ...but the league-table feature falls back to the promoted-team level.
+    assert feats.iloc[0]["home_season_ppg"] == pytest.approx(PROMOTED_PPG)
 
 
 def test_venue_form_uses_only_home_or_away_matches():
@@ -132,3 +136,46 @@ def test_fixture_after_last_match_uses_all_history(league):
     upcoming = league["date"].max() + pd.Timedelta(days=7)
     feats = build_fixture_features(league, "Arsenal", "Chelsea", upcoming)
     assert not feats[FEATURE_COLUMNS].isna().any().any()
+
+
+def test_season_ppg_hand_calculation(arsenal_home_run):
+    """Points per game this season before each match: W W D L W -> 3, 3, 7/3, 7/4, 10/5."""
+    feats = build_match_features(arsenal_home_run)
+    expected = [PROMOTED_PPG, 3.0, 3.0, 7 / 3, 7 / 4, 10 / 5]
+    np.testing.assert_allclose(feats["home_season_ppg"], expected)
+    # The opponents' table values come from their own earlier matches (all lost or drew).
+    assert feats.iloc[5]["away_season_ppg"] == pytest.approx(1.0)   # Everton: one draw in 1 game
+    assert feats.iloc[5]["season_ppg_diff"] == pytest.approx(2.0 - 1.0)
+
+
+def test_season_ppg_resets_each_season_and_falls_back_to_last_season():
+    """A new season starts from last season's points per game, then counts only new games."""
+    df = pd.DataFrame({
+        "date": pd.to_datetime(["2021-08-14", "2022-05-01", "2022-08-13", "2022-08-20"]),
+        "home_team": ["Arsenal", "Arsenal", "Arsenal", "Arsenal"],
+        "away_team": ["Chelsea", "Chelsea", "Chelsea", "Chelsea"],
+        "home_goals": [1, 0, 0, 2],
+        "away_goals": [1, 2, 3, 0],
+        "home_xg": [1.0] * 4,
+        "away_xg": [1.0] * 4,
+    })
+    df["result"] = match_outcome(df["home_goals"], df["away_goals"])
+    feats = build_match_features(df)
+    # Arsenal 2021/22: D, L -> 1 point in 2 games = 0.5. Opening game of 2022/23 uses that.
+    assert feats.iloc[2]["home_season_ppg"] == pytest.approx(0.5)
+    # Second game of 2022/23: only this season counts -> the opening loss = 0 points.
+    assert feats.iloc[3]["home_season_ppg"] == pytest.approx(0.0)
+    # Chelsea: D, W last season = 2.0; then W in the opener -> 3.0
+    assert feats.iloc[2]["away_season_ppg"] == pytest.approx(2.0)
+    assert feats.iloc[3]["away_season_ppg"] == pytest.approx(3.0)
+    # The one-fixture path agrees, including the season fallback.
+    single = build_fixture_features(df, "Arsenal", "Chelsea", "2022-08-13", window=1, venue_min=1)
+    assert single.iloc[0]["home_season_ppg"] == pytest.approx(0.5)
+    assert single.iloc[0]["away_season_ppg"] == pytest.approx(2.0)
+
+
+def test_july_2020_counts_as_the_end_of_2019_20():
+    """The COVID-delayed 2019/20 season ended in July 2020; season starts in August."""
+    from src.features import season_of
+    seasons = season_of(pd.to_datetime(["2020-07-26", "2020-09-12", "2026-05-24", "2026-08-21"]))
+    assert list(seasons) == [2019, 2020, 2025, 2026]

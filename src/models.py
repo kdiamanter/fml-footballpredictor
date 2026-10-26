@@ -31,10 +31,11 @@ from src.features import DIFF_FEATURES, FEATURE_COLUMNS, drop_incomplete, matche
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 
-# Inputs per model. The logistic model uses the differences only (8 features)
+# Inputs per model. The logistic model uses the differences only (9 features)
 # because home and away features carry the same information twice. The
-# Poisson model needs the separate home and away values (16 features): home
-# goals depend on the home attack AND the away defence, not just their gap.
+# Poisson model also gets the separate home and away values (27 features: 9
+# home, 9 away and the 9 differences): home goals depend on the home attack
+# AND the away defence, not just their gap.
 LOGISTIC_FEATURES = DIFF_FEATURES
 POISSON_FEATURES = FEATURE_COLUMNS
 

@@ -1,6 +1,7 @@
 # STATUS
 
-## Current stage: 4 (predictions) done. All four stages built
+## Current stage: league-table feature added (2026-10-26). All stages built; numbers below the
+## "League-table feature" section supersede the earlier Stage 3/season-replay figures
 
 ## Stage 1: data, features, baseline (approved 2026-10-13)
 
@@ -21,8 +22,8 @@
 - `src/models.py`:
   - `LogisticModel`: standardised features → multinomial logistic regression on the 8
     difference features. Output reordered from sklearn's alphabetical A/D/H to our H/D/A.
-  - `PoissonModel`: two Poisson regressions (home goals, away goals) on all 16 home/away
-    features; expected goals → independent-Poisson scoreline grid (0–10 goals) → H/D/A.
+  - `PoissonModel`: two Poisson regressions (home goals, away goals) on 24
+    features (8 home, 8 away, 8 differences); expected goals → independent-Poisson scoreline grid (0–10 goals) → H/D/A.
   - `fit_logistic_before(date)` / `fit_poisson_before(date)`: train only on matches before a
     date, ready for the Stage 3 walk-forward backtest.
   - `save_model` / `load_model` (joblib, `models/`).
@@ -127,6 +128,31 @@
   baseline RPS −0.012 (95% interval −0.023 to −0.001). Models trailed the baseline in August
   (stale early-season form), led from mid-September on.
 - Tests: 71 passing.
+
+## League-table feature (2026-10-26)
+
+- Question: "why not just pick the team higher in the table?" Tested, then added the table as a feature.
+- `src/features.py`: new per-team feature `season_ppg` = points per game this season before the match
+  (season taken from the date, starts in August; July 2020 counts as 2019/20). First match of a season:
+  previous season's points per game, else `PROMOTED_PPG` = 1.0. Plus `season_ppg_diff`. Logistic now
+  uses 9 differences, Poisson 27 features. Never NaN, so the 3,710 modelled matches are unchanged.
+- Tests: 77 passing (hand-checked season values, season reset + fallback, July 2020 edge case; the
+  existing leakage tests cover the new columns automatically).
+- Walk-forward (2,666 matches): Logistic RPS 0.2097 -> 0.2063, Poisson 0.2097 -> 0.2062, accuracy
+  51.5% -> 52.0%, log loss 1.005 -> 0.995. Gain vs form-only RPS -0.0034 [-0.0054, -0.0014]; better in
+  every season.
+- Comparisons (notebook 03): table rule (higher points per game wins) 50.5% accuracy; table-only model
+  RPS 0.2114 / 51.8%; form-only 0.2097 / 51.3% (form vs table: not significant, -0.0018
+  [-0.0057, +0.0022]); form + table 0.2063 / 52.0% (beats table only -0.0052 [-0.0077, -0.0026]).
+  Rule and model agree on 81% of matches; where they disagree the model is right 41%, the rule 33%.
+- Also tested and not added: season-long xG averages. As good as the table on their own, and adding
+  both gave no clear extra gain (Poisson both vs table -0.0006, interval includes 0); season xG also
+  hurt slightly in Aug-Sep (falls back on last season's xG).
+- 2025/26 replay: RPS Poisson 0.2137, logistic 0.2135, baseline 0.2278; favourite won 48% / 46% / 43%
+  (accuracy slightly lower than before, probability scores better). Model behind baseline on running RPS
+  until 29 Sep 2025.
+- Honesty: the feature was chosen after comparing on the same backtest seasons, so its gain may be
+  slightly optimistic; one simple feature, helpful in all 8 seasons, so the risk is small.
 
 ### How to use weekly
 After each round: notebook 04 with `FORCE_DOWNLOAD = True`, run all, set it back to False.
